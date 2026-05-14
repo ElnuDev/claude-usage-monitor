@@ -22,6 +22,14 @@ LOCK_TTL=30     # seconds between API attempts
 
 mkdir -p "$CACHE_DIR"
 
+# --- Claude Code presence check ---
+# Exit silently when the `claude` CLI isn't installed so status-bar
+# consumers can hide the widget instead of showing a fallback.
+
+if ! command -v claude &>/dev/null; then
+  exit 0
+fi
+
 # --- Dependency check ---
 
 for cmd in curl jq; do
@@ -105,6 +113,7 @@ get_token() {
 
   # Linux: check common credential file locations
   local cred_paths=(
+    "$HOME/.claude/.credentials.json"
     "$HOME/.claude/credentials.json"
     "${XDG_CONFIG_HOME:-$HOME/.config}/claude/credentials.json"
   )
