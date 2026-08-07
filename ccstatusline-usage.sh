@@ -40,7 +40,12 @@ if [[ -f "$LOCK_FILE" ]]; then
 fi
 touch "$LOCK_FILE"
 
-TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty')
+# Take the token only while it's still valid. expiresAt is epoch milliseconds;
+# an expired token buys a guaranteed 401, and enough of those in a row earn a
+# 429 with a long Retry-After. Credentials with no expiresAt are used as-is.
+TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+  | jq -r --argjson now "$(( ($(date +%s) + 60) * 1000 ))" \
+      '.claudeAiOauth | select((.expiresAt // infinite) > $now) | .accessToken // empty' 2>/dev/null)
 
 if [[ -z "$TOKEN" ]]; then
   [[ -f "$CACHE_FILE" ]] && cat "$CACHE_FILE" && exit 0

@@ -99,12 +99,31 @@ touch "$LOCK_FILE"
 
 # --- Get OAuth token from Claude Code credentials ---
 
+# Access tokens are short-lived (~8h) and only Claude Code itself refreshes
+# them, so leaving Claude Code closed overnight guarantees an expired token
+# here. Sending one anyway is worse than sending nothing: a status bar on a
+# timer spends every poll on a certain 401, and enough consecutive failures
+# earn a 429 with a long Retry-After -- so the widget stays dark for a while
+# after Claude Code comes back and fixes the credentials. Check the expiry we
+# were handed and skip the request we know cannot succeed.
+EXPIRY_SKEW=60  # count a token expiring within the next minute as already gone
+
+# Reads a credentials JSON blob on stdin, echoes .claudeAiOauth.accessToken
+# only while .claudeAiOauth.expiresAt (epoch milliseconds) is still ahead of
+# us. Credentials with no expiresAt are taken at face value: older Claude Code
+# versions omit the field, and a 401 beats refusing to work at all.
+token_if_valid() {
+  jq -r --argjson now "$(( ($(date +%s) + EXPIRY_SKEW) * 1000 ))" \
+    '.claudeAiOauth | select((.expiresAt // infinite) > $now) | .accessToken // empty' \
+    2>/dev/null
+}
+
 get_token() {
   # macOS Keychain
   if command -v security &>/dev/null; then
     local token
     token=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
-      | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+      | token_if_valid || true)
     if [[ -n "$token" ]]; then
       echo "$token"
       return
@@ -120,7 +139,7 @@ get_token() {
   for path in "${cred_paths[@]}"; do
     if [[ -f "$path" ]]; then
       local token
-      token=$(jq -r '.claudeAiOauth.accessToken // empty' "$path" 2>/dev/null)
+      token=$(token_if_valid < "$path" || true)
       if [[ -n "$token" ]]; then
         echo "$token"
         return
