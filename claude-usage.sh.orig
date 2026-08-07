@@ -17,15 +17,8 @@ set -euo pipefail
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 CACHE_FILE="$CACHE_DIR/claude-usage.txt"
 LOCK_FILE="$CACHE_DIR/claude-usage.lock"
-BACKOFF_FILE="$CACHE_DIR/claude-usage.backoff"
-CACHE_TTL=180    # seconds to use cached result (3 min)
-# LOCK_TTL must be >= CACHE_TTL. A failed attempt leaves the cache stale, so
-# the CACHE_TTL check stops short-circuiting and the lock becomes the only
-# brake -- with a shorter LOCK_TTL the script would call the API *more* often
-# while failing than while healthy, which is how it gets stuck rate limited.
-LOCK_TTL=180     # minimum seconds between API attempts
-STALE_TTL=1800   # stop displaying a cached result older than this (30 min)
-MAX_BACKOFF=3600 # cap on a server-requested Retry-After (1 hour)
+CACHE_TTL=180   # seconds to use cached result (3 min)
+LOCK_TTL=30     # seconds between API attempts
 
 mkdir -p "$CACHE_DIR"
 
@@ -63,34 +56,12 @@ file_age() {
 }
 
 show_cached_or_fallback() {
-  # Only serve the cache while it is still plausibly meaningful. The cached
-  # figure is a *countdown*, so past STALE_TTL it is simply wrong, and serving
-  # it forever makes a broken widget indistinguishable from a working one.
-  if [[ -f "$CACHE_FILE" ]] && [[ $(file_age "$CACHE_FILE") -lt $STALE_TTL ]]; then
+  if [[ -f "$CACHE_FILE" ]]; then
     cat "$CACHE_FILE"
     exit 0
   fi
   echo "--:-- --%"
   exit 1
-}
-
-# Reads a header value out of a saved response header block, case-insensitively
-# and without depending on sed/awk/grep (status bars run with a minimal PATH).
-header_value() {
-  local wanted="$1" file="$2" line name value
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line=${line%$'\r'}
-    name=${line%%:*}
-    [[ "$name" == "$line" ]] && continue
-    # shellcheck disable=SC2254
-    case "$name" in
-      $wanted)
-        value=${line#*:}
-        value=${value// /}
-        ;;
-    esac
-  done < "$file"
-  echo "${value:-}"
 }
 
 parse_utc_timestamp() {
@@ -117,15 +88,6 @@ if [[ -f "$CACHE_FILE" ]]; then
 fi
 
 # --- Rate limit ---
-
-# A server-requested cool-off always wins over the local lock: continuing to
-# poll a rate limited endpoint is what keeps it rate limited.
-if [[ -f "$BACKOFF_FILE" ]]; then
-  backoff_until=$(cat "$BACKOFF_FILE" 2>/dev/null || true)
-  if [[ "$backoff_until" =~ ^[0-9]+$ ]] && [[ $(date +%s) -lt $backoff_until ]]; then
-    show_cached_or_fallback
-  fi
-fi
 
 if [[ -f "$LOCK_FILE" ]]; then
   lock_age=$(file_age "$LOCK_FILE")
@@ -194,21 +156,9 @@ fi
 
 # --- Call usage API ---
 
-HEADER_FILE=$(mktemp)
-trap 'rm -f "$HEADER_FILE"' EXIT
-
-RESPONSE=$(curl -s --max-time 5 -D "$HEADER_FILE" "https://api.anthropic.com/api/oauth/usage" \
+RESPONSE=$(curl -s --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
   -H "Authorization: Bearer $TOKEN" \
   -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null || true)
-
-# Honour Retry-After (HTTP 429) so the next attempt is scheduled by the server
-# rather than by our polling interval.
-RETRY_AFTER=$(header_value '[Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]' "$HEADER_FILE")
-if [[ "$RETRY_AFTER" =~ ^[0-9]+$ ]]; then
-  [[ $RETRY_AFTER -gt $MAX_BACKOFF ]] && RETRY_AFTER=$MAX_BACKOFF
-  echo $(($(date +%s) + RETRY_AFTER)) > "$BACKOFF_FILE"
-  show_cached_or_fallback
-fi
 
 if [[ -z "$RESPONSE" ]]; then
   show_cached_or_fallback
@@ -222,8 +172,6 @@ SESSION_UTIL=$(echo "$RESPONSE" | jq -r '.five_hour.utilization // empty' 2>/dev
 if [[ -z "$SESSION_RESET" || -z "$SESSION_UTIL" ]]; then
   show_cached_or_fallback
 fi
-
-rm -f "$BACKOFF_FILE"
 
 RESET_TS=$(parse_utc_timestamp "$SESSION_RESET")
 NOW_TS=$(date +%s)
